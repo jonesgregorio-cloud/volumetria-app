@@ -42,6 +42,10 @@ const parseDateBR = (val) => {
   // DD/MM/YYYY
   m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
+  // YYYY-MM-DD (ISO sem hora, ex.: vindo de CSV) — força horário local
+  // pra não deslocar o dia por causa do fuso (UTC vs. UTC-3)
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
   const d = new Date(s);
   return isNaN(d) ? null : d;
 };
@@ -88,6 +92,14 @@ const classify = (row) => {
   const dataPrim = parseDateBR(row.data_primeira_tentativa_entrega);
   const dataPrev = parseDateBR(row.data_previsao_entrega_cliente);
   const dataEnt = parseDateBR(row.data_entrega);
+  const statusLower = status.toLowerCase();
+
+  // Regra 0 (prioridade máxima): Extraviada ou Em devolução são falhas reais de
+  // entrega — a mercadoria não chegou ao cliente. Contam SEMPRE como problema,
+  // independentemente das datas (inclusive de uma eventual 1ª tentativa no prazo).
+  if (statusLower.includes('extravi') || statusLower.includes('devolu')) {
+    return 'em_atraso';
+  }
 
   // Regra 1 (prioritária): se houve 1ª tentativa de entrega dentro do prazo,
   // o pedido conta como NO PRAZO — independentemente de quando a entrega final
@@ -581,7 +593,7 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
   ${summarySection}
 
   <h2 class="section-h">${analysis.sortedMonths.length > 1 ? 'Desempenho por mês' : 'Desempenho do período'}</h2>
-  <p class="method-note"><strong>Metodologia:</strong> a classificação é aplicada diretamente sobre as datas. Um pedido conta como <strong>no prazo</strong> em qualquer um destes casos: a 1ª tentativa de entrega ocorreu dentro do prazo (mesmo que a entrega final tenha sido posterior); foi entregue até a data prevista; ou ainda está em trânsito e a previsão ainda não venceu. Pedidos só entram em <em>fora do prazo</em> ou <em>em atraso</em> quando nenhuma tentativa ocorreu no prazo previsto.</p>
+  <p class="method-note"><strong>Metodologia:</strong> a classificação é aplicada diretamente sobre as datas. Um pedido conta como <strong>no prazo</strong> em qualquer um destes casos: a 1ª tentativa de entrega ocorreu dentro do prazo (mesmo que a entrega final tenha sido posterior); foi entregue até a data prevista; ou ainda está em trânsito e a previsão ainda não venceu. Pedidos entram em <em>fora do prazo</em> ou <em>em atraso</em> quando nenhuma tentativa ocorreu no prazo previsto; encomendas <em>extraviadas</em> ou <em>em devolução</em> contam sempre como problema, independentemente das datas.</p>
   ${monthSections}
   ${consolidatedSection}
 
@@ -651,6 +663,12 @@ export default function App() {
       if (clean.length === 0) throw new Error('Nenhum pedido válido encontrado na planilha.');
       setData(clean);
       setFilename(file.name);
+      // Se a planilha inteira for de um único cliente, pré-preenche o nome no relatório.
+      // O usuário ainda pode editar/limpar o campo manualmente.
+      const uniqueClients = [
+        ...new Set(clean.map((r) => String(r.nome_comercial ?? '').trim()).filter(Boolean)),
+      ];
+      if (uniqueClients.length === 1) setClientName(uniqueClients[0]);
     } catch (e) {
       setError('Não foi possível ler o arquivo: ' + e.message);
       setData(null);
@@ -681,7 +699,7 @@ export default function App() {
     if (!data) return null;
 
     const enriched = data.map((r) => {
-      const dataEnvio = parseDateBR(r.data_hora_envio);
+      const dataEnvio = parseDateBR(r.data_envio ?? r.data_hora_envio);
       const dataPrim = parseDateBR(r.data_primeira_tentativa_entrega);
       const dataPrev = parseDateBR(r.data_previsao_entrega_cliente);
       const dataEnt = parseDateBR(r.data_entrega);
@@ -1018,7 +1036,7 @@ export default function App() {
                   <span className="text-[11px] uppercase tracking-[0.2em] text-[#1c1c2e]/50">Etapa 02</span>
                 </div>
                 <p className="text-xs text-[#1c1c2e]/60 mb-6 max-w-3xl leading-relaxed">
-                  <strong className="text-[#1c1c2e]/80">Metodologia:</strong> a classificação é aplicada diretamente sobre as datas. Um pedido conta como <strong>no prazo</strong> em qualquer um destes casos: a 1ª tentativa de entrega ocorreu dentro do prazo (mesmo que a entrega final tenha sido posterior); foi entregue até a data prevista; ou ainda está em trânsito e a previsão ainda não venceu. Pedidos só entram em <em>fora do prazo</em> ou <em>em atraso</em> quando nenhuma tentativa ocorreu no prazo previsto.
+                  <strong className="text-[#1c1c2e]/80">Metodologia:</strong> a classificação é aplicada diretamente sobre as datas. Um pedido conta como <strong>no prazo</strong> em qualquer um destes casos: a 1ª tentativa de entrega ocorreu dentro do prazo (mesmo que a entrega final tenha sido posterior); foi entregue até a data prevista; ou ainda está em trânsito e a previsão ainda não venceu. Pedidos entram em <em>fora do prazo</em> ou <em>em atraso</em> quando nenhuma tentativa ocorreu no prazo previsto; encomendas <em>extraviadas</em> ou <em>em devolução</em> contam sempre como problema, independentemente das datas.
                 </p>
 
                 <div className="space-y-8">

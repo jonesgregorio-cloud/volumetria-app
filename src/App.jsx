@@ -718,12 +718,16 @@ const buildReportHTML = (analysis, filename, todayStr, clientName, sections = {}
     const letterhead = `${clientName && clientName.trim() ? `<div class="client-banner"><div class="client-banner-label">Relatório de volumetria preparado para</div><div class="client-banner-name">${escapeHTML(clientName.trim())}</div></div>` : ''}<div class="report-header"><div class="brand-mark">▦</div><div class="report-header-text"><div class="brand-title">Analisador de Volumetria</div><div class="brand-meta">Base OPS · Performance de entrega</div></div></div>`;
     const footerHTML = `<footer class="report-footer"><div class="footer-partners"><div class="footer-partner"><img src="${LOGO_MANDAE}" alt="Mandaê" class="footer-logo" /></div><div class="footer-partner"><img src="${LOGO_ENVIO}" alt="Nuvem Envio" class="footer-logo" /></div></div><div class="footer-tagline">Parceiros oficiais</div></footer>`;
     const parts = [
-      show('resumo') ? summarySection : '',
       show('mensal') ? `<h2 class="section-h">Desempenho por mês</h2><p class="method-note"><strong>Metodologia:</strong> a classificação usa apenas as datas. Conta como <strong>no prazo</strong> o pedido entregue até a data prevista (ou com 1ª tentativa de entrega dentro do prazo) e o que ainda está em trânsito com a previsão não vencida. Os demais entram em <em>fora do prazo</em> ou <em>em atraso</em>; encomendas <em>extraviadas</em> ou <em>em devolução</em> contam sempre como problema, independentemente das datas.</p>${monthSections}` : '',
       show('consolidado') ? consolidatedBlock + renderTrend() : '',
       show('ofensoras') ? `<h2 class="section-h">Top 3 transportadoras ofensoras</h2>${renderBigOffenders()}` : '',
       show('complementares') ? renderComplementares() : '',
     ].filter(Boolean);
+    // O resumo divide a primeira página com a próxima seção (evita página quase vazia)
+    if (show('resumo')) {
+      if (parts.length) parts[0] = summarySection + parts[0];
+      else parts.push(summarySection);
+    }
     if (parts.length === 0) parts.push('');
     parts[0] = letterhead + parts[0];
     parts[parts.length - 1] = parts[parts.length - 1] + footerHTML;
@@ -1165,7 +1169,7 @@ export default function App() {
                   A planilha precisa seguir o modelo padrão (com colunas <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">codigo_rastreamento</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">status</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">transportadora</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_envio</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_primeira_tentativa_entrega</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_previsao_entrega_cliente</span> e <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_entrega</span>).
                 </p>
                 <p className="mt-4 text-[13px] text-[#1c1c2e]/55 max-w-xl mx-auto leading-relaxed">
-                  <strong className="text-[#1c1c2e]/75">Critério de prazo:</strong> pedidos cuja 1ª tentativa de entrega ocorreu dentro do prazo são considerados <em>no prazo</em>, mesmo que a entrega final tenha sido posterior. Pedidos só entram em <em>fora do prazo</em> ou <em>em atraso</em> se nenhuma tentativa ocorreu dentro do prazo previsto.
+                  <strong className="text-[#1c1c2e]/75">Critério de prazo:</strong> a classificação usa apenas as datas — conta como <em>no prazo</em> o pedido entregue até a data prevista (ou com 1ª tentativa dentro do prazo) e o que ainda está em trânsito com a previsão não vencida. Os demais entram em <em>fora do prazo</em> ou <em>em atraso</em>; encomendas <em>extraviadas</em> ou <em>em devolução</em> contam sempre como problema.
                 </p>
               </div>
 

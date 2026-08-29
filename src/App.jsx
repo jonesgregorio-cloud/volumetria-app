@@ -87,6 +87,27 @@ const fmtPct = (v) => {
 
 const fmtNum = (n) => new Intl.NumberFormat('pt-BR').format(n);
 
+const toNum = (v) => {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  const n = parseFloat(String(v).replace(',', '.'));
+  return isFinite(n) ? n : null;
+};
+const median = (arr) => {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+};
+const percentile = (arr, p) => {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.floor(s.length * p))];
+};
+const mean = (arr) => (arr.length ? arr.reduce((s, x) => s + x, 0) / arr.length : null);
+const fmtBRL = (n) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(n || 0);
+const fmtDays = (n) => (n == null ? '—' : `${(Math.round(n * 10) / 10).toString().replace('.', ',')}d`);
+
 const classify = (row) => {
   const status = String(row.status || '').trim();
   const dataPrim = parseDateBR(row.data_primeira_tentativa_entrega);
@@ -133,6 +154,18 @@ const CATEGORIES = [
 
 const PROBLEM_ROW_KEYS = ['fora_prazo', 'em_atraso'];
 
+// Meta de referência (SLA): % de pedidos no prazo considerado saudável
+const SLA_TARGET = 0.95;
+
+// Seções/páginas do PDF que o usuário pode incluir ou não no export
+const PDF_SECTIONS = [
+  { key: 'resumo', label: 'Resumo' },
+  { key: 'mensal', label: 'Por mês' },
+  { key: 'consolidado', label: 'Consolidado' },
+  { key: 'ofensoras', label: 'Ofensoras' },
+  { key: 'complementares', label: 'Complementares' },
+];
+
 const COLOR = {
   emerald: { soft: 'bg-emerald-50', text: 'text-emerald-800', border: 'border-emerald-200', solid: 'bg-emerald-600',  hex: '#059669', softHex: '#ecfdf5', borderHex: '#a7f3d0' },
   amber:   { soft: 'bg-amber-50',   text: 'text-amber-800',   border: 'border-amber-200',   solid: 'bg-amber-500',    hex: '#d97706', softHex: '#fffbeb', borderHex: '#fde68a' },
@@ -151,25 +184,30 @@ const escapeHTML = (s) => String(s ?? '')
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#39;');
 
-const buildReportHTML = (analysis, filename, todayStr, clientName) => {
+const buildReportHTML = (analysis, filename, todayStr, clientName, sections = {}) => {
+  const show = (k) => sections[k] !== false;
   const renderBar = (data) => {
     const total = data.total;
-    return `<div class="bar">${CATEGORIES.map((c) => {
-      const v = data.categories[c.key];
-      const pct = total > 0 ? (v / total) * 100 : 0;
-      if (pct === 0) return '';
-      return `<span style="width:${pct.toFixed(3)}%;background:${COLOR[c.color].hex};display:block;height:100%"></span>`;
-    }).join('')}</div>`;
+    const onTime = total ? data.categories.no_prazo / total : 0;
+    const above = onTime >= SLA_TARGET;
+    return `<div class="bar-wrap">
+      <div class="bar">${CATEGORIES.map((c) => {
+        const v = data.categories[c.key];
+        const pct = total > 0 ? (v / total) * 100 : 0;
+        if (pct === 0) return '';
+        return `<span style="width:${pct.toFixed(3)}%;background:${COLOR[c.color].hex};display:block;height:100%"></span>`;
+      }).join('')}</div>
+      <span class="bar-target" style="left:${(SLA_TARGET * 100).toFixed(1)}%"></span>
+      <div class="bar-meta">Meta ${fmtPct(SLA_TARGET)} no prazo · <strong style="color:${above ? '#047857' : '#b91c1c'}">${above ? 'meta atingida' : 'abaixo da meta'}</strong> (${fmtPct(onTime)})</div>
+    </div>`;
   };
 
   const renderCategoryGrid = (data) => {
     const total = data.total;
-    const savedCount = (data.savedRows || []).length;
     return `<div class="cat-grid">${CATEGORIES.map((c) => {
       const v = data.categories[c.key];
       const pct = total > 0 ? v / total : 0;
       const cl = COLOR[c.color];
-      const showSaved = c.key === 'no_prazo' && savedCount > 0;
       return `
         <div class="cat-box" style="background:${cl.softHex};border-color:${cl.borderHex}">
           <span class="cat-dot" style="background:${cl.hex}"></span>
@@ -179,7 +217,6 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
               <span class="cat-num">${fmtNum(v)}</span>
               <span class="cat-pct">${fmtPct(pct)}</span>
             </div>
-            ${showSaved ? `<div class="cat-sub">inclui ${fmtNum(savedCount)} com 1ª tent. no prazo</div>` : ''}
           </div>
         </div>`;
     }).join('')}</div>`;
@@ -227,7 +264,7 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
     const carrier = r._carrier || r.transportadora || '—';
     const dataPrev = parseDateBR(r.data_previsao_entrega_cliente);
     const dataEnt = parseDateBR(r.data_entrega);
-    const dataEnvio = parseDateBR(r.data_hora_envio);
+    const dataEnvio = parseDateBR(r.data_envio ?? r.data_hora_envio);
     const dataPrim = parseDateBR(r.data_primeira_tentativa_entrega);
     let detail = '';
     let badge = '';
@@ -379,13 +416,63 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
       </p>`;
   };
 
+  const renderComplementares = () => {
+    const ins = analysis.insights;
+    if (!ins) return '';
+    const lt = ins.leadTime;
+    const gd = ins.gapDist;
+    const maxB = Math.max(1, ...gd.buckets.map((b) => b.count));
+    const TOP = 12;
+    const topUF = ins.byUF.slice(0, TOP);
+    const restUF = ins.byUF.slice(TOP);
+    const restAgg = restUF.reduce(
+      (a, u) => { a.total += u.total; a.no_prazo += u.no_prazo; a.leads.push(...u.leads); return a; },
+      { total: 0, no_prazo: 0, leads: [] }
+    );
+    const fastShare = gd.total ? gd.buckets[0].count / gd.total : 0;
+    const total = analysis.overall.total;
+    const ufRow = (uf, vol, share, rate, lead) =>
+      `<tr><td>${escapeHTML(uf)}</td><td>${fmtNum(vol)}</td><td>${fmtPct(share)}</td><td>${fmtPct(rate)}</td><td>${fmtDays(lead)}</td></tr>`;
+    return `
+      <h2 class="section-h">Análises complementares</h2>
+
+      <div class="comp-sub">Prazo real de entrega</div>
+      <p class="comp-note">Tempo entre o envio e a entrega efetiva, medido sobre os ${fmtNum(lt.n)} pedidos já entregues no período. Complementa o “% no prazo” mostrando a consistência da operação.</p>
+      <div class="lead-grid">
+        <div class="lead-tile"><div class="lead-label">Mediana</div><div class="lead-value">${fmtDays(lt.median)}</div><div class="lead-sub">metade entrega até aqui</div></div>
+        <div class="lead-tile"><div class="lead-label">Média</div><div class="lead-value">${fmtDays(lt.mean)}</div></div>
+        <div class="lead-tile"><div class="lead-label">90% até</div><div class="lead-value">${fmtDays(lt.p90)}</div><div class="lead-sub">9 em cada 10 pedidos</div></div>
+        <div class="lead-tile"><div class="lead-label">Máximo</div><div class="lead-value">${fmtDays(lt.max)}</div><div class="lead-sub">caso mais lento</div></div>
+      </div>
+
+      ${gd.total > 0 ? `
+      <div class="comp-sub">Tamanho dos atrasos</div>
+      <p class="comp-note">Das ${fmtNum(gd.total)} entregas fora do prazo, <strong style="color:#047857">${fmtPct(fastShare)}</strong> atrasaram no máximo 2 dias. Atraso médio de ${fmtDays(gd.mean)}.</p>
+      <div class="gap-block">
+        ${gd.buckets.map((b) => `<div class="gap-row"><div class="gap-label">${escapeHTML(b.label)}</div><div class="gap-track"><div class="gap-fill" style="width:${((b.count / maxB) * 100).toFixed(1)}%"></div></div><div class="gap-num">${fmtNum(b.count)} · ${fmtPct(gd.total ? b.count / gd.total : 0)}</div></div>`).join('')}
+      </div>` : ''}
+
+      <div class="comp-sub">Desempenho por estado</div>
+      <p class="comp-note">Onde o volume se concentra e como o prazo se comporta por destino. Ordenado por volume.</p>
+      <table class="uf-table">
+        <thead><tr><th>UF</th><th>Volume</th><th>% do total</th><th>No prazo</th><th>Lead médio</th></tr></thead>
+        <tbody>
+          ${topUF.map((u) => ufRow(u.uf, u.total, total ? u.total / total : 0, u.onTimeRate, u.avgLead)).join('')}
+          ${restUF.length > 0 ? ufRow(`+${restUF.length} estados`, restAgg.total, total ? restAgg.total / total : 0, restAgg.total ? restAgg.no_prazo / restAgg.total : 0, mean(restAgg.leads)) : ''}
+        </tbody>
+      </table>`;
+  };
+
   const css = `
     @page { size: A4; margin: 14mm 12mm; }
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
     html, body { font-family: 'DM Sans', -apple-system, system-ui, sans-serif; color: #1c1c2e; background: #ffffff; line-height: 1.45; }
     strong { font-weight: 600; }
 
-    .client-banner { text-align: center; margin: -4mm 0 12mm; padding: 14px 0 16px; border-bottom: 2px solid #1c1c2e; }
+    /* Cada seção é capturada como uma página do PDF (download direto) */
+    .pdf-page { width: 794px; padding: 44px 46px 52px; background: #ffffff; }
+
+    .client-banner { text-align: center; margin: 0 0 10mm; padding: 4px 0 16px; border-bottom: 2px solid #1c1c2e; }
     .client-banner-label { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.3em; color: rgba(28,28,46,0.55); margin-bottom: 6px; }
     .client-banner-name { font-family: 'Fraunces', Georgia, serif; font-size: 32px; font-weight: 400; color: #1c1c2e; line-height: 1.1; letter-spacing: -0.01em; }
 
@@ -425,7 +512,10 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
     .month-title { font-family: 'Fraunces', Georgia, serif; font-size: 26px; font-weight: 400; margin-top: 4px; }
     .month-total { font-family: 'Fraunces', Georgia, serif; font-size: 32px; font-weight: 300; margin-top: 4px; line-height: 1; text-align: right; }
 
-    .bar { display: flex; height: 6px; margin: 14px 18px 0; border-radius: 999px; overflow: hidden; background: rgba(28,28,46,0.08); }
+    .bar-wrap { position: relative; margin: 14px 18px 0; }
+    .bar { display: flex; height: 6px; border-radius: 999px; overflow: hidden; background: rgba(28,28,46,0.08); }
+    .bar-target { position: absolute; top: -2px; height: 10px; width: 1.5px; background: #1c1c2e; opacity: 0.75; }
+    .bar-meta { font-size: 10px; color: rgba(28,28,46,0.6); margin-top: 6px; }
 
     .cat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 14px 18px 16px; }
     .cat-box { border: 1px solid; border-radius: 2px; padding: 9px 11px; display: flex; align-items: center; gap: 10px; break-inside: avoid; }
@@ -491,6 +581,33 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
     .tiny-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.2em; color: rgba(28,28,46,0.5); margin-bottom: 3px; }
     .fine-print { font-size: 10.5px; color: rgba(28,28,46,0.6); margin-top: 12px; line-height: 1.5; max-width: 70ch; }
     .empty-good { padding: 18px; border: 1px solid #a7f3d0; background: #ecfdf5; color: #064e3b; border-radius: 2px; font-size: 13px; }
+
+    .comp-sub { font-family: 'Fraunces', Georgia, serif; font-size: 17px; font-weight: 400; margin: 20px 0 4px; break-after: avoid-page; }
+    .comp-note { font-size: 11px; color: rgba(28,28,46,0.65); margin-bottom: 10px; max-width: 78ch; line-height: 1.5; }
+    .lead-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; break-inside: avoid; }
+    .lead-tile { border: 1px solid rgba(28,28,46,0.15); border-radius: 2px; padding: 10px 12px; }
+    .lead-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.2em; color: rgba(28,28,46,0.5); }
+    .lead-value { font-family: 'Fraunces', Georgia, serif; font-size: 26px; font-weight: 300; margin-top: 4px; line-height: 1; }
+    .lead-sub { font-size: 9px; color: rgba(28,28,46,0.55); margin-top: 3px; }
+    .gap-block { break-inside: avoid; }
+    .gap-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+    .gap-label { width: 96px; font-size: 10px; text-align: right; color: rgba(28,28,46,0.7); flex-shrink: 0; }
+    .gap-track { flex: 1; height: 16px; background: rgba(28,28,46,0.06); border-radius: 2px; overflow: hidden; }
+    .gap-fill { height: 100%; background: #d97706; }
+    .gap-num { width: 90px; font-family: 'JetBrains Mono', monospace; font-size: 10px; color: rgba(28,28,46,0.7); flex-shrink: 0; }
+    .uf-table { width: 100%; border-collapse: collapse; font-size: 11px; border: 1px solid rgba(28,28,46,0.15); break-inside: avoid; }
+    .uf-table th { text-align: right; font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; color: rgba(28,28,46,0.55); padding: 6px 10px; background: rgba(28,28,46,0.03); font-weight: 500; }
+    .uf-table th:first-child, .uf-table td:first-child { text-align: left; }
+    .uf-table td { padding: 5px 10px; border-top: 1px solid rgba(28,28,46,0.08); font-family: 'JetBrains Mono', monospace; text-align: right; }
+
+    .trend-block { break-inside: avoid; }
+    .trend-row { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
+    .trend-label { width: 110px; font-size: 11px; color: rgba(28,28,46,0.75); flex-shrink: 0; }
+    .trend-track { position: relative; flex: 1; height: 16px; background: rgba(28,28,46,0.06); border-radius: 2px; overflow: hidden; }
+    .trend-fill { height: 100%; }
+    .trend-target { position: absolute; top: 0; bottom: 0; width: 1px; background: rgba(28,28,46,0.45); }
+    .trend-pct { width: 64px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 11px; flex-shrink: 0; }
+    .trend-delta { width: 66px; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 10px; flex-shrink: 0; }
   `;
 
   const summarySection = `
@@ -540,14 +657,14 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
         </div>
         ${renderBar(m)}
         ${renderCategoryGrid(m)}
-        ${renderSaved(m)}
         ${renderMonthOffenders(m.offenders, 'month')}
         ${renderRastreios(m)}
       </section>`;
   }).join('');
 
-  const consolidatedSection = analysis.sortedMonths.length > 1 ? `
-    <section class="month-card consolidated page-break">
+  const consolidatedBlock = `
+    <h2 class="section-h">Consolidado do período</h2>
+    <section class="month-card consolidated">
       <div class="month-head">
         <div>
           <div class="month-eyebrow">Consolidado</div>
@@ -560,8 +677,30 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
       </div>
       ${renderBar(analysis.overall)}
       ${renderCategoryGrid(analysis.overall)}
-      ${renderSaved(analysis.overall, { consolidated: true })}
-    </section>` : '';
+    </section>`;
+
+  const renderTrend = () => {
+    const ms = analysis.sortedMonths;
+    if (ms.length < 2) return '';
+    const rateOf = (mk) => {
+      const m = analysis.months[mk];
+      return m.total ? m.categories.no_prazo / m.total : 0;
+    };
+    const rows = ms.map((mk, i) => {
+      const onTime = rateOf(mk);
+      const delta = i > 0 ? onTime - rateOf(ms[i - 1]) : null;
+      const above = onTime >= SLA_TARGET;
+      return `<div class="trend-row">
+        <div class="trend-label">${escapeHTML(ptMonthName(mk))}</div>
+        <div class="trend-track"><div class="trend-fill" style="width:${(onTime * 100).toFixed(1)}%;background:${above ? '#059669' : '#d97706'}"></div><span class="trend-target" style="left:${(SLA_TARGET * 100).toFixed(1)}%"></span></div>
+        <div class="trend-pct">${fmtPct(onTime)}</div>
+        <div class="trend-delta">${delta == null ? '—' : `<span style="color:${delta >= 0 ? '#047857' : '#b91c1c'}">${delta >= 0 ? '▲' : '▼'} ${fmtPct(Math.abs(delta))}</span>`}</div>
+      </div>`;
+    }).join('');
+    return `<div class="comp-sub">Evolução mês a mês</div>
+      <p class="comp-note">Percentual no prazo por mês. A linha vertical marca a meta de ${fmtPct(SLA_TARGET)}.</p>
+      <div class="trend-block">${rows}</div>`;
+  };
 
   return `<!DOCTYPE html>
 <html lang="pt-BR">
@@ -575,59 +714,21 @@ const buildReportHTML = (analysis, filename, todayStr, clientName) => {
 <style>${css}</style>
 </head>
 <body>
-  ${clientName && clientName.trim() ? `
-    <div class="client-banner">
-      <div class="client-banner-label">Relatório de volumetria preparado para</div>
-      <div class="client-banner-name">${escapeHTML(clientName.trim())}</div>
-    </div>
-  ` : ''}
-
-  <div class="report-header">
-    <div class="brand-mark">▦</div>
-    <div class="report-header-text">
-      <div class="brand-title">Analisador de Volumetria</div>
-      <div class="brand-meta">Base OPS · 1ª Tentativa · Transportadoras</div>
-    </div>
-  </div>
-
-  ${summarySection}
-
-  <h2 class="section-h">${analysis.sortedMonths.length > 1 ? 'Desempenho por mês' : 'Desempenho do período'}</h2>
-  <p class="method-note"><strong>Metodologia:</strong> a classificação é aplicada diretamente sobre as datas. Um pedido conta como <strong>no prazo</strong> em qualquer um destes casos: a 1ª tentativa de entrega ocorreu dentro do prazo (mesmo que a entrega final tenha sido posterior); foi entregue até a data prevista; ou ainda está em trânsito e a previsão ainda não venceu. Pedidos entram em <em>fora do prazo</em> ou <em>em atraso</em> quando nenhuma tentativa ocorreu no prazo previsto; encomendas <em>extraviadas</em> ou <em>em devolução</em> contam sempre como problema, independentemente das datas.</p>
-  ${monthSections}
-  ${consolidatedSection}
-
-  <div class="page-break"></div>
-  <h2 class="section-h">Top 3 transportadoras ofensoras</h2>
-  ${renderBigOffenders()}
-
-  <footer class="report-footer">
-    <div class="footer-partners">
-      <div class="footer-partner">
-        <img src="${LOGO_MANDAE}" alt="Mandaê" class="footer-logo" />
-      </div>
-      <div class="footer-partner">
-        <img src="${LOGO_ENVIO}" alt="Nuvem Envio" class="footer-logo" />
-      </div>
-    </div>
-    <div class="footer-tagline">Parceiros oficiais</div>
-  </footer>
-
-  <script>
-    (function() {
-      function fire() {
-        try { window.focus(); window.print(); } catch(e) {}
-      }
-      if (document.fonts && document.fonts.ready) {
-        Promise.race([
-          document.fonts.ready,
-          new Promise(function(r) { setTimeout(r, 1500); })
-        ]).then(function() { setTimeout(fire, 250); });
-      } else {
-        setTimeout(fire, 800);
-      }
-    })();
-  </script>
+  ${(() => {
+    const letterhead = `${clientName && clientName.trim() ? `<div class="client-banner"><div class="client-banner-label">Relatório de volumetria preparado para</div><div class="client-banner-name">${escapeHTML(clientName.trim())}</div></div>` : ''}<div class="report-header"><div class="brand-mark">▦</div><div class="report-header-text"><div class="brand-title">Analisador de Volumetria</div><div class="brand-meta">Base OPS · Performance de entrega</div></div></div>`;
+    const footerHTML = `<footer class="report-footer"><div class="footer-partners"><div class="footer-partner"><img src="${LOGO_MANDAE}" alt="Mandaê" class="footer-logo" /></div><div class="footer-partner"><img src="${LOGO_ENVIO}" alt="Nuvem Envio" class="footer-logo" /></div></div><div class="footer-tagline">Parceiros oficiais</div></footer>`;
+    const parts = [
+      show('resumo') ? summarySection : '',
+      show('mensal') ? `<h2 class="section-h">Desempenho por mês</h2><p class="method-note"><strong>Metodologia:</strong> a classificação usa apenas as datas. Conta como <strong>no prazo</strong> o pedido entregue até a data prevista (ou com 1ª tentativa de entrega dentro do prazo) e o que ainda está em trânsito com a previsão não vencida. Os demais entram em <em>fora do prazo</em> ou <em>em atraso</em>; encomendas <em>extraviadas</em> ou <em>em devolução</em> contam sempre como problema, independentemente das datas.</p>${monthSections}` : '',
+      show('consolidado') ? consolidatedBlock + renderTrend() : '',
+      show('ofensoras') ? `<h2 class="section-h">Top 3 transportadoras ofensoras</h2>${renderBigOffenders()}` : '',
+      show('complementares') ? renderComplementares() : '',
+    ].filter(Boolean);
+    if (parts.length === 0) parts.push('');
+    parts[0] = letterhead + parts[0];
+    parts[parts.length - 1] = parts[parts.length - 1] + footerHTML;
+    return parts.map((p) => `<div class="pdf-page">${p}</div>`).join('\n  ');
+  })()}
 </body>
 </html>`;
 };
@@ -641,6 +742,11 @@ export default function App() {
   const [clientName, setClientName] = useState('');
   const [loading, setLoading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [activeTab, setActiveTab] = useState('mensal');
+  const [pdfSections, setPdfSections] = useState(
+    Object.fromEntries(PDF_SECTIONS.map((s) => [s.key, true]))
+  );
   const inputRef = useRef(null);
 
   const handleFile = useCallback(async (file) => {
@@ -710,12 +816,20 @@ export default function App() {
         dataPrim != null && dataPrev != null && dataEnt != null &&
         dataPrim.getTime() <= dataPrev.getTime() &&
         dataEnt.getTime() > dataPrev.getTime();
+      const category = classify(r);
+      const leadDays = daysBetween(dataEnt, dataEnvio);
+      const gapDays = daysBetween(dataEnt, dataPrev);
       return {
         ...r,
-        _category: classify(r),
+        _category: category,
         _monthKey: monthKeyOf(dataEnvio),
         _carrier: String(r.transportadora || 'Não informada').trim() || 'Não informada',
         _savedByFirstAttempt: savedByFirstAttempt,
+        _uf: String(r.uf || '').trim().toUpperCase() || '—',
+        _leadDays: leadDays != null && leadDays >= 0 ? leadDays : null,
+        _gapDays: gapDays,
+        _frete: toNum(r.preco_frete),
+        _valor: toNum(r.valor_declarado),
       };
     });
 
@@ -789,42 +903,166 @@ export default function App() {
     });
 
     const sortedMonths = Object.keys(months).sort();
-    return { overall, months, sortedMonths, offenders };
+
+    // ---- Análises complementares (nível do período consolidado) ----
+    // Prazo real de entrega (envio → entrega), só sobre pedidos já entregues
+    const leads = enriched.filter((r) => r._leadDays != null).map((r) => r._leadDays);
+    const leadTime = {
+      n: leads.length,
+      median: median(leads),
+      p90: percentile(leads, 0.9),
+      mean: mean(leads),
+      max: leads.length ? Math.max(...leads) : null,
+    };
+
+    // Distribuição do atraso (dias além da previsão) das entregas fora do prazo
+    const lateGaps = enriched
+      .filter((r) => r._category === 'fora_prazo' && r._gapDays != null && r._gapDays > 0)
+      .map((r) => r._gapDays);
+    const gapBuckets = [
+      { key: '1-2', label: '1 a 2 dias', min: 1, max: 2, count: 0 },
+      { key: '3-5', label: '3 a 5 dias', min: 3, max: 5, count: 0 },
+      { key: '6-10', label: '6 a 10 dias', min: 6, max: 10, count: 0 },
+      { key: '10+', label: 'mais de 10 dias', min: 11, max: Infinity, count: 0 },
+    ];
+    lateGaps.forEach((g) => {
+      const b = gapBuckets.find((x) => g >= x.min && g <= x.max);
+      if (b) b.count++;
+    });
+    const gapDist = { total: lateGaps.length, mean: mean(lateGaps), buckets: gapBuckets };
+
+    // Desempenho por estado (UF)
+    const ufMap = {};
+    enriched.forEach((r) => {
+      const uf = r._uf || '—';
+      if (!ufMap[uf]) ufMap[uf] = { uf, total: 0, no_prazo: 0, problems: 0, leads: [] };
+      ufMap[uf].total++;
+      if (r._category === 'no_prazo') ufMap[uf].no_prazo++;
+      else ufMap[uf].problems++;
+      if (r._leadDays != null) ufMap[uf].leads.push(r._leadDays);
+    });
+    const byUF = Object.values(ufMap)
+      .map((u) => ({ ...u, onTimeRate: u.total ? u.no_prazo / u.total : 0, avgLead: mean(u.leads) }))
+      .sort((a, b) => b.total - a.total);
+
+    // Custo de frete × performance por transportadora (visão interna)
+    const carrierMap = {};
+    enriched.forEach((r) => {
+      const c = r._carrier;
+      if (!carrierMap[c]) carrierMap[c] = { name: c, total: 0, no_prazo: 0, problems: 0, frete: 0 };
+      carrierMap[c].total++;
+      if (r._category === 'no_prazo') carrierMap[c].no_prazo++;
+      else carrierMap[c].problems++;
+      if (r._frete != null) carrierMap[c].frete += r._frete;
+    });
+    const carrierPerf = Object.values(carrierMap)
+      .map((c) => ({ ...c, onTimeRate: c.total ? c.no_prazo / c.total : 0, avgFrete: c.total ? c.frete / c.total : 0 }))
+      .sort((a, b) => b.total - a.total);
+
+    // Extravios e devoluções — casos acionáveis (visão interna)
+    const lostReturns = enriched
+      .filter((r) => {
+        const s = String(r.status || '').toLowerCase();
+        return s.includes('extravi') || s.includes('devolu');
+      })
+      .map((r) => ({
+        code: r.codigo_rastreamento || '—',
+        status: String(r.status || '').trim(),
+        carrier: r._carrier,
+        cidade: r.cidade_destino || '—',
+        uf: r._uf || '—',
+        valor: r._valor,
+      }))
+      .sort((a, b) => (b.valor || 0) - (a.valor || 0));
+
+    const totalFrete = enriched.reduce((s, r) => s + (r._frete || 0), 0);
+    const totalValor = enriched.reduce((s, r) => s + (r._valor || 0), 0);
+
+    const insights = { leadTime, gapDist, byUF, carrierPerf, lostReturns, totalFrete, totalValor };
+
+    return { overall, months, sortedMonths, offenders, insights };
   }, [data]);
 
-  const exportPDF = useCallback(() => {
-    if (!analysis) return;
-    const html = buildReportHTML(analysis, filename || 'Base_OPS.xlsx', formatTodayBR(), clientName);
-    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
+  const exportPDF = useCallback(async () => {
+    if (!analysis || exporting) return;
     const stamp = formatTodayBR().replace(/\//g, '-');
     const safeClient = (clientName || '').trim().replace(/[^\w\u00C0-\u017F\s-]/g, '').slice(0, 40);
     const fname = safeClient
-      ? `Relatorio_Volumetria_${safeClient}_${stamp}.html`
-      : `Relatorio_Volumetria_${stamp}.html`;
+      ? `Relatorio_Volumetria_${safeClient}_${stamp}.pdf`
+      : `Relatorio_Volumetria_${stamp}.pdf`;
 
-    let opened = null;
+    setExporting(true);
+    setError(null);
+    let iframe = null;
     try {
-      opened = window.open(url, '_blank', 'noopener,noreferrer');
+      const html = buildReportHTML(analysis, filename || 'Base_OPS.xlsx', formatTodayBR(), clientName, pdfSections);
+
+      // Renderiza o relat\u00F3rio num iframe isolado (evita que o CSS do relat\u00F3rio
+      // afete o app e vice-versa), na largura de uma folha A4 @96dpi.
+      iframe = document.createElement('iframe');
+      iframe.setAttribute('aria-hidden', 'true');
+      Object.assign(iframe.style, {
+        position: 'fixed', left: '-10000px', top: '0',
+        width: '794px', height: '1123px', border: '0', background: '#fff',
+      });
+      document.body.appendChild(iframe);
+      const doc = iframe.contentDocument;
+      doc.open();
+      doc.write(html);
+      doc.close();
+
+      // Espera fontes e layout assentarem antes de capturar
+      try { await doc.fonts.ready; } catch (e) { /* noop */ }
+      await new Promise((r) => setTimeout(r, 350));
+
+      const [jspdfMod, h2cMod] = await Promise.all([
+        import('jspdf'),
+        import('html2canvas'),
+      ]);
+      const jsPDF = jspdfMod.jsPDF || jspdfMod.default;
+      const html2canvas = h2cMod.default || h2cMod;
+
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pageW = 210;
+      const pageH = 297;
+      const pageEls = [...doc.querySelectorAll('.pdf-page')];
+      let firstPage = true;
+
+      for (const el of pageEls) {
+        const canvas = await html2canvas(el, {
+          scale: 1.5,
+          backgroundColor: '#ffffff',
+          useCORS: true,
+          logging: false,
+          windowWidth: 794,
+        });
+        // JPEG mant\u00E9m o arquivo leve (PNG geraria dezenas de MB); qualidade alta
+        // preserva a nitidez do texto sobre o fundo branco do relat\u00F3rio.
+        const imgData = canvas.toDataURL('image/jpeg', 0.92);
+        const imgH = (canvas.height * pageW) / canvas.width;
+        let heightLeft = imgH;
+        let position = 0;
+        if (!firstPage) pdf.addPage();
+        firstPage = false;
+        pdf.addImage(imgData, 'JPEG', 0, position, pageW, imgH);
+        heightLeft -= pageH;
+        // Se a se\u00E7\u00E3o for mais alta que uma folha, continua nas pr\u00F3ximas
+        while (heightLeft > 0) {
+          position -= pageH;
+          pdf.addPage();
+          pdf.addImage(imgData, 'JPEG', 0, position, pageW, imgH);
+          heightLeft -= pageH;
+        }
+      }
+
+      pdf.save(fname);
     } catch (e) {
-      opened = null;
+      setError('N\u00E3o foi poss\u00EDvel gerar o PDF: ' + (e?.message || e));
+    } finally {
+      if (iframe && iframe.parentNode) iframe.parentNode.removeChild(iframe);
+      setExporting(false);
     }
-
-    if (opened) {
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-      return;
-    }
-
-    // Fallback: trigger download (popup blocked or window.open unavailable in sandbox)
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fname;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  }, [analysis, filename, clientName]);
+  }, [analysis, filename, clientName, pdfSections, exporting]);
 
   return (
     <>
@@ -874,17 +1112,18 @@ export default function App() {
               </div>
               <div>
                 <div className="ff-display text-xl leading-none tracking-tight">Analisador de Volumetria</div>
-                <div className="text-[11px] uppercase tracking-[0.2em] text-[#1c1c2e]/50 mt-1">Base OPS · 1ª Tentativa · Transportadoras</div>
+                <div className="text-[11px] uppercase tracking-[0.2em] text-[#1c1c2e]/50 mt-1">Base OPS · Performance de entrega</div>
               </div>
             </div>
             {data && (
               <div className="flex items-center gap-2 print:hidden">
                 <button
                   onClick={exportPDF}
-                  className="flex items-center gap-2 text-sm px-4 py-2 bg-[#1c1c2e] text-[#faf7f2] hover:bg-[#b45309] transition rounded-sm"
+                  disabled={exporting}
+                  className="flex items-center gap-2 text-sm px-4 py-2 bg-[#1c1c2e] text-[#faf7f2] hover:bg-[#b45309] transition rounded-sm disabled:opacity-60 disabled:cursor-wait"
                 >
                   <Printer className="w-4 h-4" />
-                  Exportar PDF
+                  {exporting ? 'Gerando PDF…' : 'Baixar PDF'}
                 </button>
                 <button
                   onClick={reset}
@@ -923,7 +1162,7 @@ export default function App() {
                   Envie a planilha de <em className="text-[#b45309] not-italic font-normal">Base OPS</em> e receba o relatório de desempenho
                 </h1>
                 <p className="mt-6 text-[#1c1c2e]/70 max-w-xl mx-auto">
-                  A planilha precisa seguir o modelo padrão (com colunas <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">codigo_rastreamento</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">status</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">transportadora</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_hora_envio</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_primeira_tentativa_entrega</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_previsao_entrega_cliente</span> e <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_entrega</span>).
+                  A planilha precisa seguir o modelo padrão (com colunas <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">codigo_rastreamento</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">status</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">transportadora</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_envio</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_primeira_tentativa_entrega</span>, <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_previsao_entrega_cliente</span> e <span className="ff-mono text-xs bg-[#1c1c2e]/5 px-1.5 py-0.5 rounded">data_entrega</span>).
                 </p>
                 <p className="mt-4 text-[13px] text-[#1c1c2e]/55 max-w-xl mx-auto leading-relaxed">
                   <strong className="text-[#1c1c2e]/75">Critério de prazo:</strong> pedidos cuja 1ª tentativa de entrega ocorreu dentro do prazo são considerados <em>no prazo</em>, mesmo que a entrega final tenha sido posterior. Pedidos só entram em <em>fora do prazo</em> ou <em>em atraso</em> se nenhuma tentativa ocorreu dentro do prazo previsto.
@@ -1025,69 +1264,117 @@ export default function App() {
                     <div className="text-xs text-[#1c1c2e]/60 mt-1">parceiros operando no período</div>
                   </div>
                 </div>
+
+                {/* Seletor de páginas do PDF */}
+                <div className="mt-6 pt-5 border-t border-[#1c1c2e]/10 print:hidden">
+                  <div className="flex items-center flex-wrap gap-x-5 gap-y-2">
+                    <span className="text-[11px] uppercase tracking-[0.2em] text-[#1c1c2e]/50">Páginas no PDF</span>
+                    {PDF_SECTIONS.map((s) => (
+                      <label key={s.key} className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={pdfSections[s.key]}
+                          onChange={(e) => setPdfSections((prev) => ({ ...prev, [s.key]: e.target.checked }))}
+                          className="accent-[#b45309] w-4 h-4"
+                        />
+                        {s.label}
+                      </label>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-[#1c1c2e]/50 mt-2">
+                    Marque o que deve entrar no PDF. Cada item vira uma página própria no arquivo.
+                  </p>
+                </div>
               </section>
 
-              {/* Monthly breakdown */}
-              <section>
-                <div className="flex items-baseline justify-between mb-3 border-b border-[#1c1c2e]/15 pb-3">
-                  <h2 className="ff-display text-3xl">
-                    {analysis.sortedMonths.length > 1 ? 'Desempenho por mês' : 'Desempenho do período'}
-                  </h2>
-                  <span className="text-[11px] uppercase tracking-[0.2em] text-[#1c1c2e]/50">Etapa 02</span>
-                </div>
-                <p className="text-xs text-[#1c1c2e]/60 mb-6 max-w-3xl leading-relaxed">
-                  <strong className="text-[#1c1c2e]/80">Metodologia:</strong> a classificação é aplicada diretamente sobre as datas. Um pedido conta como <strong>no prazo</strong> em qualquer um destes casos: a 1ª tentativa de entrega ocorreu dentro do prazo (mesmo que a entrega final tenha sido posterior); foi entregue até a data prevista; ou ainda está em trânsito e a previsão ainda não venceu. Pedidos entram em <em>fora do prazo</em> ou <em>em atraso</em> quando nenhuma tentativa ocorreu no prazo previsto; encomendas <em>extraviadas</em> ou <em>em devolução</em> contam sempre como problema, independentemente das datas.
-                </p>
+              {/* Abas: Por mês | Consolidado */}
+              <div className="flex gap-1 border-b border-[#1c1c2e]/15 print:hidden">
+                {[
+                  { key: 'mensal', label: 'Por mês' },
+                  { key: 'consolidado', label: 'Consolidado do período' },
+                ].map((t) => (
+                  <button
+                    key={t.key}
+                    onClick={() => setActiveTab(t.key)}
+                    className={`px-5 py-2.5 text-sm rounded-t-sm border-b-2 -mb-px transition ${
+                      activeTab === t.key
+                        ? 'border-[#b45309] text-[#1c1c2e] font-medium'
+                        : 'border-transparent text-[#1c1c2e]/50 hover:text-[#1c1c2e]/80'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
 
-                <div className="space-y-8">
-                  {analysis.sortedMonths.map((mk) => (
-                    <MonthCard
-                      key={mk}
-                      monthLabel={ptMonthName(mk)}
-                      data={analysis.months[mk]}
-                    />
-                  ))}
-                  {analysis.sortedMonths.length > 1 && (
+              {/* Aba: Por mês */}
+              {activeTab === 'mensal' && (
+                <section>
+                  <p className="text-xs text-[#1c1c2e]/60 mb-6 max-w-3xl leading-relaxed">
+                    <strong className="text-[#1c1c2e]/80">Metodologia:</strong> a classificação usa apenas as datas. Conta como <strong>no prazo</strong> o pedido entregue até a data prevista (ou com 1ª tentativa de entrega dentro do prazo) e o que ainda está em trânsito com a previsão não vencida. Os demais entram em <em>fora do prazo</em> ou <em>em atraso</em>; encomendas <em>extraviadas</em> ou <em>em devolução</em> contam sempre como problema, independentemente das datas.
+                  </p>
+                  <div className="space-y-8">
+                    {analysis.sortedMonths.map((mk) => (
+                      <MonthCard
+                        key={mk}
+                        monthLabel={ptMonthName(mk)}
+                        data={analysis.months[mk]}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {/* Aba: Consolidado do período */}
+              {activeTab === 'consolidado' && (
+                <div className="space-y-12">
+                  <section>
                     <MonthCard
                       monthLabel="Consolidado do período"
                       data={analysis.overall}
                       consolidated
                     />
-                  )}
+                  </section>
+
+                  {/* Evolução mês a mês (só faz sentido com >1 mês) */}
+                  <TendenciaMensal analysis={analysis} />
+
+                  {/* Top ofensoras */}
+                  <section>
+                    <div className="flex items-baseline justify-between mb-6 border-b border-[#1c1c2e]/15 pb-3">
+                      <h2 className="ff-display text-3xl flex items-center gap-3">
+                        <TrendingDown className="w-7 h-7 text-[#b45309]" strokeWidth={1.5} />
+                        Top 3 transportadoras ofensoras
+                      </h2>
+                    </div>
+                    {analysis.offenders.length === 0 ? (
+                      <div className="border border-emerald-200 bg-emerald-50 text-emerald-900 px-5 py-6 rounded-sm">
+                        Nenhuma transportadora apresentou ocorrências no período. 🎉
+                      </div>
+                    ) : (
+                      <div className="grid md:grid-cols-3 gap-5">
+                        {analysis.offenders.map((o, idx) => (
+                          <OffenderCard
+                            key={o.name}
+                            rank={idx + 1}
+                            offender={o}
+                            totalOrders={analysis.overall.total}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    <p className="text-xs text-[#1c1c2e]/60 mt-5 leading-relaxed max-w-3xl">
+                      <strong>Critério:</strong> ranking pelo número absoluto de ocorrências (entregas fora do prazo, em atraso, extravios e devoluções). A porcentagem em relação ao total considera o universo de {fmtNum(analysis.overall.total)} pedidos do período.
+                    </p>
+                  </section>
+
+                  {/* Análises complementares (vão para o relatório do cliente) */}
+                  <AnalisesComplementares insights={analysis.insights} totalOrders={analysis.overall.total} />
+
+                  {/* Visão interna — NÃO entra no PDF exportado */}
+                  <VisaoInterna insights={analysis.insights} />
                 </div>
-              </section>
-
-              {/* Top offenders */}
-              <section>
-                <div className="flex items-baseline justify-between mb-6 border-b border-[#1c1c2e]/15 pb-3">
-                  <h2 className="ff-display text-3xl flex items-center gap-3">
-                    <TrendingDown className="w-7 h-7 text-[#b45309]" strokeWidth={1.5} />
-                    Top 3 transportadoras ofensoras
-                  </h2>
-                  <span className="text-[11px] uppercase tracking-[0.2em] text-[#1c1c2e]/50">Etapa 03</span>
-                </div>
-
-                {analysis.offenders.length === 0 ? (
-                  <div className="border border-emerald-200 bg-emerald-50 text-emerald-900 px-5 py-6 rounded-sm">
-                    Nenhuma transportadora apresentou ocorrências no período. 🎉
-                  </div>
-                ) : (
-                  <div className="grid md:grid-cols-3 gap-5">
-                    {analysis.offenders.map((o, idx) => (
-                      <OffenderCard
-                        key={o.name}
-                        rank={idx + 1}
-                        offender={o}
-                        totalOrders={analysis.overall.total}
-                      />
-                    ))}
-                  </div>
-                )}
-
-                <p className="text-xs text-[#1c1c2e]/60 mt-5 leading-relaxed max-w-3xl">
-                  <strong>Critério:</strong> ranking pelo número absoluto de ocorrências (entregas fora do prazo, em atraso, extravios e devoluções). A porcentagem em relação ao total considera o universo de {fmtNum(analysis.overall.total)} pedidos do período.
-                </p>
-              </section>
+              )}
             </div>
           )}
         </main>
@@ -1117,6 +1404,214 @@ export default function App() {
 }
 
 /* ---------- Month card ---------- */
+
+function StatTile({ label, value, sub }) {
+  return (
+    <div className="border border-[#1c1c2e]/12 bg-white rounded-sm px-4 py-3">
+      <div className="text-[10px] uppercase tracking-[0.2em] text-[#1c1c2e]/50">{label}</div>
+      <div className="ff-display text-3xl font-light mt-1 leading-none">{value}</div>
+      {sub && <div className="text-[11px] text-[#1c1c2e]/55 mt-1">{sub}</div>}
+    </div>
+  );
+}
+
+function AnalisesComplementares({ insights, totalOrders }) {
+  const { leadTime, gapDist, byUF } = insights;
+  const TOP = 12;
+  const topUF = byUF.slice(0, TOP);
+  const restUF = byUF.slice(TOP);
+  const restAgg = restUF.reduce(
+    (a, u) => {
+      a.total += u.total; a.no_prazo += u.no_prazo; a.problems += u.problems; a.leads.push(...u.leads); return a;
+    },
+    { total: 0, no_prazo: 0, problems: 0, leads: [] }
+  );
+  const maxBucket = Math.max(1, ...gapDist.buckets.map((b) => b.count));
+  const fastShare = gapDist.total ? gapDist.buckets[0].count / gapDist.total : 0;
+
+  return (
+    <section>
+      <div className="flex items-baseline justify-between mb-6 border-b border-[#1c1c2e]/15 pb-3">
+        <h2 className="ff-display text-3xl">Análises complementares</h2>
+        <span className="text-[11px] uppercase tracking-[0.2em] text-[#1c1c2e]/50">Etapa 04</span>
+      </div>
+
+      {/* Prazo real de entrega */}
+      <div className="mb-10">
+        <h3 className="ff-display text-xl mb-1">Prazo real de entrega</h3>
+        <p className="text-xs text-[#1c1c2e]/60 mb-4 max-w-3xl leading-relaxed">
+          Tempo entre o envio e a entrega efetiva, medido sobre os {fmtNum(leadTime.n)} pedidos já entregues no período. Complementa o “% no prazo” mostrando a consistência da operação.
+        </p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <StatTile label="Mediana" value={fmtDays(leadTime.median)} sub="metade entrega até aqui" />
+          <StatTile label="Média" value={fmtDays(leadTime.mean)} />
+          <StatTile label="90% até" value={fmtDays(leadTime.p90)} sub="9 em cada 10 pedidos" />
+          <StatTile label="Máximo" value={fmtDays(leadTime.max)} sub="caso mais lento" />
+        </div>
+      </div>
+
+      {/* Tamanho dos atrasos */}
+      {gapDist.total > 0 && (
+        <div className="mb-10">
+          <h3 className="ff-display text-xl mb-1">Tamanho dos atrasos</h3>
+          <p className="text-xs text-[#1c1c2e]/60 mb-4 max-w-3xl leading-relaxed">
+            Das {fmtNum(gapDist.total)} entregas fora do prazo, <strong className="text-[#059669]">{fmtPct(fastShare)}</strong> atrasaram no máximo 2 dias. Atraso médio de {fmtDays(gapDist.mean)}.
+          </p>
+          <div className="space-y-2 max-w-2xl">
+            {gapDist.buckets.map((b) => {
+              const share = gapDist.total ? b.count / gapDist.total : 0;
+              return (
+                <div key={b.key} className="flex items-center gap-3">
+                  <div className="w-32 text-xs text-[#1c1c2e]/70 text-right shrink-0">{b.label}</div>
+                  <div className="flex-1 h-6 bg-[#1c1c2e]/5 rounded-sm overflow-hidden">
+                    <div className="h-full bg-[#d97706]/80" style={{ width: `${(b.count / maxBucket) * 100}%` }} />
+                  </div>
+                  <div className="w-24 text-xs ff-mono text-[#1c1c2e]/70 shrink-0">{fmtNum(b.count)} · {fmtPct(share)}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Desempenho por estado */}
+      <div>
+        <h3 className="ff-display text-xl mb-1">Desempenho por estado</h3>
+        <p className="text-xs text-[#1c1c2e]/60 mb-4 max-w-3xl leading-relaxed">
+          Onde o volume se concentra e como o prazo se comporta por destino. Ordenado por volume.
+        </p>
+        <div className="overflow-x-auto border border-[#1c1c2e]/12 rounded-sm">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-[#1c1c2e]/[0.03] text-[10px] uppercase tracking-[0.15em] text-[#1c1c2e]/55">
+                <th className="text-left font-medium px-4 py-2.5">UF</th>
+                <th className="text-right font-medium px-4 py-2.5">Volume</th>
+                <th className="text-right font-medium px-4 py-2.5">% do total</th>
+                <th className="text-right font-medium px-4 py-2.5">No prazo</th>
+                <th className="text-right font-medium px-4 py-2.5">Lead médio</th>
+              </tr>
+            </thead>
+            <tbody>
+              {topUF.map((u) => (
+                <tr key={u.uf} className="border-t border-[#1c1c2e]/[0.08]">
+                  <td className="px-4 py-2 ff-mono">{u.uf}</td>
+                  <td className="px-4 py-2 text-right ff-mono">{fmtNum(u.total)}</td>
+                  <td className="px-4 py-2 text-right ff-mono text-[#1c1c2e]/60">{fmtPct(totalOrders ? u.total / totalOrders : 0)}</td>
+                  <td className={`px-4 py-2 text-right ff-mono ${u.onTimeRate < 0.95 ? 'text-[#d97706]' : 'text-[#059669]'}`}>{fmtPct(u.onTimeRate)}</td>
+                  <td className="px-4 py-2 text-right ff-mono text-[#1c1c2e]/70">{fmtDays(u.avgLead)}</td>
+                </tr>
+              ))}
+              {restUF.length > 0 && (
+                <tr className="border-t border-[#1c1c2e]/[0.08] text-[#1c1c2e]/60">
+                  <td className="px-4 py-2 italic">+{restUF.length} estados</td>
+                  <td className="px-4 py-2 text-right ff-mono">{fmtNum(restAgg.total)}</td>
+                  <td className="px-4 py-2 text-right ff-mono">{fmtPct(totalOrders ? restAgg.total / totalOrders : 0)}</td>
+                  <td className="px-4 py-2 text-right ff-mono">{fmtPct(restAgg.total ? restAgg.no_prazo / restAgg.total : 0)}</td>
+                  <td className="px-4 py-2 text-right ff-mono">{fmtDays(mean(restAgg.leads))}</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TendenciaMensal({ analysis }) {
+  const months = analysis.sortedMonths.map((mk) => {
+    const m = analysis.months[mk];
+    return { mk, label: ptMonthName(mk), onTime: m.total ? m.categories.no_prazo / m.total : 0 };
+  });
+  if (months.length < 2) return null;
+  return (
+    <section>
+      <div className="flex items-baseline justify-between mb-3 border-b border-[#1c1c2e]/15 pb-3">
+        <h2 className="ff-display text-3xl">Evolução mês a mês</h2>
+      </div>
+      <p className="text-xs text-[#1c1c2e]/60 mb-5 max-w-3xl leading-relaxed">
+        Percentual no prazo por mês. A linha vertical marca a meta de {fmtPct(SLA_TARGET)}.
+      </p>
+      <div className="space-y-3 max-w-2xl">
+        {months.map((m, i) => {
+          const prev = i > 0 ? months[i - 1].onTime : null;
+          const delta = prev != null ? m.onTime - prev : null;
+          const above = m.onTime >= SLA_TARGET;
+          return (
+            <div key={m.mk} className="flex items-center gap-3">
+              <div className="w-28 text-sm text-[#1c1c2e]/70 shrink-0">{m.label}</div>
+              <div className="relative flex-1 h-6 bg-[#1c1c2e]/5 rounded-sm overflow-hidden">
+                <div
+                  className={`h-full ${above ? 'bg-emerald-500/80' : 'bg-amber-500/80'}`}
+                  style={{ width: `${m.onTime * 100}%` }}
+                />
+                <div className="absolute top-0 bottom-0 w-px bg-[#1c1c2e]/40" style={{ left: `${SLA_TARGET * 100}%` }} />
+              </div>
+              <div className="w-16 text-right ff-mono text-sm">{fmtPct(m.onTime)}</div>
+              <div className="w-16 text-right ff-mono text-xs">
+                {delta == null ? (
+                  <span className="text-[#1c1c2e]/40">—</span>
+                ) : (
+                  <span className={delta >= 0 ? 'text-emerald-600' : 'text-red-500'}>
+                    {delta >= 0 ? '▲' : '▼'} {fmtPct(Math.abs(delta))}
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function VisaoInterna({ insights }) {
+  const { lostReturns } = insights;
+  const lostValor = lostReturns.reduce((s, r) => s + (r.valor || 0), 0);
+  const statusColor = (st) =>
+    st.toLowerCase().includes('extravi')
+      ? 'text-[#dc2626] bg-[#dc2626]/[0.08] border-[#dc2626]/25'
+      : 'text-[#b45309] bg-[#b45309]/[0.08] border-[#b45309]/25';
+
+  return (
+    <section className="print:hidden border-2 border-dashed border-[#1c1c2e]/20 rounded-sm p-6 bg-[#1c1c2e]/[0.015]">
+      <div className="flex items-baseline justify-between mb-1">
+        <h2 className="ff-display text-3xl">Visão interna</h2>
+        <span className="text-[11px] uppercase tracking-[0.2em] text-[#b45309]">Não entra no PDF</span>
+      </div>
+      <p className="text-xs text-[#1c1c2e]/60 mb-6 max-w-3xl leading-relaxed">
+        Para o seu uso no CS — casos acionáveis. Esta seção não aparece no relatório exportado ao cliente.
+      </p>
+
+      {/* Extravios e devoluções */}
+      <div>
+        <h3 className="ff-display text-xl mb-1">Extravios e devoluções</h3>
+        <p className="text-xs text-[#1c1c2e]/60 mb-4 max-w-3xl leading-relaxed">
+          {lostReturns.length === 0 ? (
+            'Nenhum caso no período.'
+          ) : (
+            <>
+              {fmtNum(lostReturns.length)} casos · <strong>{fmtBRL(lostValor)}</strong> em valor declarado. Priorize a abertura de sinistro pelos de maior valor.
+            </>
+          )}
+        </p>
+        {lostReturns.length > 0 && (
+          <div className="space-y-1.5">
+            {lostReturns.map((r) => (
+              <div key={r.code} className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-white border border-[#1c1c2e]/10 rounded-sm px-3 py-2">
+                <span className="ff-mono text-sm font-medium">{r.code}</span>
+                <span className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-sm border ${statusColor(r.status)}`}>{r.status}</span>
+                <span className="text-xs text-[#1c1c2e]/65">{r.carrier}</span>
+                <span className="text-xs text-[#1c1c2e]/50">{r.cidade}/{r.uf}</span>
+                <span className="ff-mono text-sm ml-auto">{fmtBRL(r.valor)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
 
 function MonthCard({ monthLabel, data, consolidated = false }) {
   const total = data.total;
@@ -1153,22 +1648,41 @@ function MonthCard({ monthLabel, data, consolidated = false }) {
         </div>
       </div>
 
-      {/* Stacked bar */}
+      {/* Stacked bar + meta SLA */}
       <div className="px-6 pt-5">
-        <div className="h-2 w-full flex rounded-full overflow-hidden bg-current/10">
-          {CATEGORIES.map((c) => {
-            const v = data.categories[c.key];
-            const pct = total > 0 ? (v / total) * 100 : 0;
-            if (pct === 0) return null;
-            return (
-              <div
-                key={c.key}
-                style={{ width: `${pct}%`, backgroundColor: COLOR[c.color].hex }}
-                title={`${c.label}: ${v} (${fmtPct(v / total)})`}
-              />
-            );
-          })}
+        <div className="relative">
+          <div className="h-2 w-full flex rounded-full overflow-hidden bg-current/10">
+            {CATEGORIES.map((c) => {
+              const v = data.categories[c.key];
+              const pct = total > 0 ? (v / total) * 100 : 0;
+              if (pct === 0) return null;
+              return (
+                <div
+                  key={c.key}
+                  style={{ width: `${pct}%`, backgroundColor: COLOR[c.color].hex }}
+                  title={`${c.label}: ${v} (${fmtPct(v / total)})`}
+                />
+              );
+            })}
+          </div>
+          <div
+            className="absolute top-[-3px] bottom-[-3px] w-px bg-current/70"
+            style={{ left: `${SLA_TARGET * 100}%` }}
+            title={`Meta ${fmtPct(SLA_TARGET)} no prazo`}
+          />
         </div>
+        {(() => {
+          const onTime = total ? data.categories.no_prazo / total : 0;
+          const above = onTime >= SLA_TARGET;
+          return (
+            <div className={`mt-2 text-[11px] ${consolidated ? 'text-[#faf7f2]/70 print:text-[#1c1c2e]/60' : 'text-[#1c1c2e]/55'}`}>
+              Meta {fmtPct(SLA_TARGET)} no prazo ·{' '}
+              <span className={above ? 'text-emerald-600 print:text-emerald-700' : 'text-red-500 print:text-red-600'}>
+                {above ? 'meta atingida' : 'abaixo da meta'} ({fmtPct(onTime)})
+              </span>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Categories grid */}
@@ -1178,7 +1692,6 @@ function MonthCard({ monthLabel, data, consolidated = false }) {
           const pct = total > 0 ? v / total : 0;
           const Icon = c.icon;
           const cl = COLOR[c.color];
-          const showSavedNote = c.key === 'no_prazo' && data.savedRows && data.savedRows.length > 0;
           return (
             <div
               key={c.key}
@@ -1197,50 +1710,11 @@ function MonthCard({ monthLabel, data, consolidated = false }) {
                     {fmtPct(pct)}
                   </span>
                 </div>
-                {showSavedNote && (
-                  <div className={`text-[10px] mt-0.5 leading-tight ${consolidated ? 'text-[#faf7f2]/55 print:text-[#1c1c2e]/55' : 'text-[#1c1c2e]/55'}`}>
-                    inclui {fmtNum(data.savedRows.length)} com 1ª tent. no prazo
-                  </div>
-                )}
               </div>
             </div>
           );
         })}
       </div>
-
-      {/* Saved by first attempt */}
-      {data.savedRows && data.savedRows.length > 0 && (
-        <div className={`border-t ${consolidated ? 'border-white/15' : 'border-[#1c1c2e]/10'} px-6 pt-5 pb-6 ${consolidated ? '' : 'bg-emerald-50/40'}`}>
-          <div className="flex items-center gap-2 mb-2">
-            <Sparkles className={`w-4 h-4 ${consolidated ? 'text-emerald-300 print:text-emerald-700' : 'text-emerald-700'}`} strokeWidth={2} />
-            <div className={`text-[11px] uppercase tracking-[0.25em] ${consolidated ? 'text-[#faf7f2]/60 print:text-[#1c1c2e]/60' : 'text-[#1c1c2e]/60'}`}>
-              Entregas tardias com 1ª tentativa no prazo
-            </div>
-          </div>
-
-          <div className="flex items-baseline gap-3 mb-3">
-            <span className={`ff-display text-4xl font-light leading-none ${consolidated ? '' : 'text-emerald-700'}`}>
-              {fmtNum(data.savedRows.length)}
-            </span>
-            <span className={`text-xs ${consolidated ? 'text-[#faf7f2]/65 print:text-[#1c1c2e]/60' : 'text-[#1c1c2e]/60'} leading-snug max-w-md`}>
-              pedido{data.savedRows.length > 1 ? 's' : ''} cuja 1ª tentativa de entrega ocorreu dentro do prazo, mas a entrega final foi posterior à previsão. Sob a regra de OTD ajustado, contam como <strong>no prazo</strong>.
-            </span>
-          </div>
-
-          <SavedRowsList
-            rows={data.savedRows}
-            instanceKey={`saved:${consolidated ? 'consolidated' : data.total}`}
-            openKey={openKey}
-            toggle={toggle}
-            copiedKey={copiedKey}
-            copy={copy}
-          />
-
-          <p className={`text-[10.5px] mt-3 leading-relaxed ${consolidated ? 'text-[#faf7f2]/55 print:text-[#1c1c2e]/55' : 'text-[#1c1c2e]/55'}`}>
-            <strong>Sobre as causas:</strong> a Base OPS não traz coluna de descrição de evento. As datas mostradas (1ª tentativa, previsão, entrega) e o intervalo entre 1ª tentativa e entrega final são as melhores pistas disponíveis: gap pequeno (1–2 dias) sugere reentrega rápida; gap maior indica investigação cruzada com a base de eventos.
-          </p>
-        </div>
-      )}
 
       {/* Monthly offenders */}
       {!consolidated && data.offenders && data.offenders.length > 0 && (
